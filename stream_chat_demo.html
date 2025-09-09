@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>流式聊天演示 - LLM问答系统</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .chat-container {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            height: 400px;
+            overflow-y: auto;
+            padding: 15px;
+            background: #fafafa;
+            margin-bottom: 20px;
+        }
+        .message {
+            margin-bottom: 15px;
+            padding: 10px;
+            border-radius: 8px;
+        }
+        .user-message {
+            background: #007bff;
+            color: white;
+            margin-left: 20%;
+        }
+        .ai-message {
+            background: #e9ecef;
+            color: #333;
+            margin-right: 20%;
+        }
+        .input-container {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        #questionInput {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 16px;
+        }
+        button {
+            padding: 12px 20px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+        }
+        .typing-indicator {
+            display: none;
+            color: #666;
+            font-style: italic;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .server-info {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 流式聊天演示</h1>
+        
+        <div class="server-info">
+            <strong>服务器地址:</strong> <span id="serverUrl">http://localhost:8080</span><br>
+            <strong>流式接口:</strong> <code>/api/ask/stream</code><br>
+            <strong>协议:</strong> Server-Sent Events (SSE)
+        </div>
+
+        <div class="controls">
+            <button onclick="testCORS()">测试CORS</button>
+            <button onclick="testConnection()">测试连接</button>
+            <button onclick="clearChat()">清空聊天</button>
+        </div>
+
+        <div id="status"></div>
+        
+        <div class="chat-container" id="chatContainer">
+            <div class="message ai-message">
+                👋 你好！我是AI助手，支持流式对话。请输入你的问题，我会实时回答。
+            </div>
+        </div>
+
+        <div class="typing-indicator" id="typingIndicator">
+            AI正在思考中...
+        </div>
+
+        <div class="input-container">
+            <input type="text" id="questionInput" placeholder="请输入你的问题..." 
+                   onkeypress="handleKeyPress(event)">
+            <button onclick="askQuestion()" id="askButton">发送</button>
+            <button onclick="stopStream()" id="stopButton" disabled>停止</button>
+        </div>
+    </div>
+
+    <script>
+        let currentEventSource = null;
+        const serverUrl = 'http://localhost:8080';
+
+        // 测试CORS配置
+        async function testCORS() {
+            try {
+                const response = await fetch(`${serverUrl}/api/health`, {
+                    method: 'GET',
+                    mode: 'cors',
+                    credentials: 'include'
+                });
+                if (response.ok) {
+                    showStatus('✅ CORS配置正常', 'success');
+                    return true;
+                } else {
+                    showStatus('❌ CORS配置异常', 'error');
+                    return false;
+                }
+            } catch (error) {
+                showStatus(`❌ CORS错误: ${error.message}`, 'error');
+                return false;
+            }
+        }
+
+        function showStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerHTML = `<div class="status ${type}">${message}</div>`;
+            setTimeout(() => {
+                statusDiv.innerHTML = '';
+            }, 3000);
+        }
+
+        function addMessage(content, isUser = false) {
+            const chatContainer = document.getElementById('chatContainer');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isUser ? 'user-message' : 'ai-message'}`;
+            messageDiv.innerHTML = content;
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            return messageDiv;
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                askQuestion();
+            }
+        }
+
+        function setButtonsState(asking = false) {
+            document.getElementById('askButton').disabled = asking;
+            document.getElementById('stopButton').disabled = !asking;
+            document.getElementById('questionInput').disabled = asking;
+            
+            const typingIndicator = document.getElementById('typingIndicator');
+            typingIndicator.style.display = asking ? 'block' : 'none';
+        }
+
+        async function testConnection() {
+            // 先测试CORS
+            const corsOk = await testCORS();
+            if (!corsOk) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${serverUrl}/api/health`);
+                if (response.ok) {
+                    const data = await response.json();
+                    showStatus(`✅ 服务器连接正常 - ${data.llm_provider.provider}`, 'success');
+                } else {
+                    showStatus('❌ 服务器连接失败', 'error');
+                }
+            } catch (error) {
+                showStatus(`❌ 连接错误: ${error.message}`, 'error');
+            }
+        }
+
+        function clearChat() {
+            const chatContainer = document.getElementById('chatContainer');
+            chatContainer.innerHTML = `
+                <div class="message ai-message">
+                    👋 聊天记录已清空。请输入你的问题开始新的对话。
+                </div>
+            `;
+        }
+
+        function askQuestion() {
+            const input = document.getElementById('questionInput');
+            const question = input.value.trim();
+            
+            if (!question) {
+                showStatus('请输入问题', 'error');
+                return;
+            }
+
+            // 添加用户消息
+            addMessage(question, true);
+            input.value = '';
+            
+            // 开始流式请求
+            startStreamRequest(question);
+        }
+
+        function startStreamRequest(question) {
+            setButtonsState(true);
+            
+            const url = `${serverUrl}/api/ask/stream?prompt=${encodeURIComponent(question)}`;
+            
+            // 创建EventSource时添加错误处理
+            try {
+                currentEventSource = new EventSource(url);
+            } catch (error) {
+                showStatus(`❌ 无法创建SSE连接: ${error.message}`, 'error');
+                setButtonsState(false);
+                return;
+            }
+            
+            let aiMessageDiv = null;
+            let fullAnswer = '';
+            
+            currentEventSource.onopen = function(event) {
+                showStatus('🔗 SSE连接已建立', 'info');
+            };
+            
+            currentEventSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    switch(data.type) {
+                        case 'start':
+                            showStatus(`🚀 开始接收回答 (记录ID: ${data.record_id})`, 'info');
+                            aiMessageDiv = addMessage('', false);
+                            fullAnswer = '';
+                            break;
+                            
+                        case 'delta':
+                            fullAnswer += data.content;
+                            if (aiMessageDiv) {
+                                aiMessageDiv.innerHTML = fullAnswer + '<span style="opacity:0.5">▋</span>';
+                            }
+                            break;
+                            
+                        case 'end':
+                            if (aiMessageDiv) {
+                                aiMessageDiv.innerHTML = data.answer;
+                            }
+                            showStatus('✅ 回答完成', 'success');
+                            stopStream();
+                            break;
+                            
+                        case 'error':
+                            showStatus(`❌ 错误: ${data.error}`, 'error');
+                            if (aiMessageDiv) {
+                                aiMessageDiv.innerHTML = `<span style="color: red;">错误: ${data.error}</span>`;
+                            }
+                            stopStream();
+                            break;
+                    }
+                } catch (err) {
+                    console.error('解析响应失败:', err);
+                    showStatus('❌ 解析响应失败', 'error');
+                    stopStream();
+                }
+            };
+
+            currentEventSource.onerror = function(event) {
+                console.error('SSE连接错误:', event);
+                if (currentEventSource.readyState === EventSource.CLOSED) {
+                    showStatus('❌ SSE连接已关闭', 'error');
+                } else if (currentEventSource.readyState === EventSource.CONNECTING) {
+                    showStatus('🔄 SSE正在重连...', 'info');
+                } else {
+                    showStatus('❌ SSE连接错误', 'error');
+                }
+                
+                // 如果连接失败，停止流式请求
+                if (currentEventSource.readyState === EventSource.CLOSED) {
+                    stopStream();
+                }
+            };
+        }
+
+        function stopStream() {
+            if (currentEventSource) {
+                currentEventSource.close();
+                currentEventSource = null;
+            }
+            setButtonsState(false);
+        }
+
+        // 页面加载完成后测试连接
+        window.onload = function() {
+            testConnection();
+        };
+
+        // 页面关闭时清理连接
+        window.onbeforeunload = function() {
+            stopStream();
+        };
+    </script>
+</body>
+</html>
